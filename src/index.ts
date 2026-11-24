@@ -1,7 +1,12 @@
 import express, { type Express, type Request, type Response } from 'express';
 import { MongoClient, ObjectId } from 'mongodb';
 import cors from 'cors';
-process.loadEnvFile();
+import { existsSync } from 'node:fs';
+
+if (existsSync('.env')) {
+  process.loadEnvFile();
+}
+
 const app: Express = express();
 app.use(express.json());
 app.use(cors());
@@ -10,29 +15,37 @@ const port = 4000;
 const mongoUri = process.env.MONGODB_URI;
 
 if (!mongoUri) {
-  throw new Error('MONGODB_URI is missing from .env');
+  throw new Error('MONGODB_URI environment variable is required');
 }
 
 const mongoClient = new MongoClient(mongoUri);
+const db = mongoClient.db('bankingUsers');
+const applicationsCollection = db.collection('bank-account');
+const allUsers = db.collection('user');
+const loanApplicationCollection = db.collection('loan-application');
+const adminLoanApplicationCollection = db.collection('loan-application-admin');
+
+let mongoConnection: Promise<MongoClient> | undefined;
+function connectToMongo(): Promise<MongoClient> {
+  if (!mongoConnection) {
+    mongoConnection = mongoClient.connect().then(async (client) => {
+      await client.db().admin().ping();
+      console.log('MongoDB connected successfully');
+      return client;
+    });
+  }
+  return mongoConnection;
+}
+
+app.use((_req, _res, next) => {
+  connectToMongo().then(() => next()).catch(next);
+});
 
 app.get('/', (req: Request, res: Response) => {
   res.send('MongoDB server is running');
 });
 
-
-async function startServer(): Promise<void> {
-  await mongoClient.connect();
-  await mongoClient.db().admin().ping();
-  const db = mongoClient.db('bankingUsers');
-  const applicationsCollection = db.collection('bank-account');
-  const allUsers = db.collection('user');
-  const loanApplicationCollection = db.collection('loan-application');
-  const adminLoanApplicationCollection = db.collection('loan-application-admin');
-  console.log('MongoDB connected successfully');
-
-  app.listen(port, () => {
-    console.log(`Server listening on port ${port}`);
-  });
+function registerRoutes(): void {
   app.get('/api/users', async (req: Request, res: Response) => {
     const result = await allUsers.find().toArray();
     res.send(result);
@@ -42,10 +55,14 @@ async function startServer(): Promise<void> {
     res.send({ totalCustomers });
   });
   app.get('/api/users/:id', async (req: Request, res: Response) => {
-      const { id } = req.params;
-      const query = { _id: new ObjectId(id) };
-      const result = await allUsers.findOne(query);
-      res.send(result);
+    const { id } = req.params;
+    if (typeof id !== 'string' || !ObjectId.isValid(id)) {
+      res.status(400).send({ error: 'Invalid user ID' });
+      return;
+    }
+
+    const result = await allUsers.findOne({ _id: new ObjectId(id) });
+    res.send(result);
   });
   app.get('/api/application', async (req: Request, res: Response) => {
     const result = await applicationsCollection
@@ -169,10 +186,14 @@ app.post('/api/loan-application-staff', async (req: Request, res: Response) => {
   res.send(result);
 });
 app.get('/api/loan-application-staff/:id', async (req: Request, res: Response) => {
-      const { id } = req.params;
-      const query = { _id: new ObjectId(id) };
-      const result = await loanApplicationCollection.findOne(query);
-      res.send(result);
+  const { id } = req.params;
+  if (typeof id !== 'string' || !ObjectId.isValid(id)) {
+    res.status(400).send({ error: 'Invalid loan application ID' });
+    return;
+  }
+
+  const result = await loanApplicationCollection.findOne({ _id: new ObjectId(id) });
+  res.send(result);
   });
 app.get('/api/loan-application-admin', async (req: Request, res: Response) => {
   const result = await adminLoanApplicationCollection.find().toArray();
@@ -222,7 +243,19 @@ app.post('/api/transactions', async (req: Request, res: Response) => {
   });
 }
 
-startServer().catch((error: unknown) => {
-  console.error('Failed to start server:', error);
-  process.exit(1);
-});
+registerRoutes();
+
+export default app;
+
+if (!process.env.VERCEL) {
+  connectToMongo()
+    .then(() => {
+      app.listen(port, () => {
+        console.log(`Server listening on port ${port}`);
+      });
+    })
+    .catch((error: unknown) => {
+      console.error('Failed to start server:', error);
+      process.exit(1);
+    });
+}
